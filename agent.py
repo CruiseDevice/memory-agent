@@ -1,3 +1,23 @@
+import json
+import logging
+import os
+import sys
+
+from openai import OpenAI
+
+from sqlite import MemoryStore
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+logger = logging.getLogger(__name__)
+
+client = OpenAI(base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"))
+
+db = MemoryStore()
+USER_ID = "agent_user"  # Fixed user ID for this session
+MODEL = os.environ.get("AGENT_MODEL", "gpt-4o-mini")
+
+
 SYSTEM_PROMPT = """You are a helpful assistant with persistent memory.
 You have three tools: memory_store, memory_search, and memory_list.
 
@@ -110,14 +130,98 @@ TOOL_SCHEMAS = [
     }      
 ]
 
+def memory_store(content: str) -> str:
+    db.store(user_id=USER_ID, content=content)
+    return f"Stored: {content}"
 
-def agent_run():
-    pass
+
+def memory_search(keyword: str) -> str:
+    rows = db.search_by_keyword(user_id=USER_ID, keyword=keyword)
+    hits = [row['content'] for row in rows]
+    return "\n".join(hits) if hits else "No matching memories"
+
+
+def memory_list() -> str:
+    rows = db.list_memories(user_id=USER_ID)
+    hits = [row['content'] for row in rows]
+    return "\n".join(hits) if hits else "No memories stored yet."
+
+
+TOOL_REGISTRY = {
+    "memory_store": memory_store,
+    "memory_search": memory_search,
+    "memory_list": memory_list,
+}
+
+
+def dispatch(name: str, arguments: str) -> str:
+    """
+    Look up the tool, parse its JSON args, run it, return a string result
+    """
+    fn = TOOL_REGISTRY.get(name)
+    if fn is None:
+        return f"Error: Unknown tool '{name}'"
+    
+    try:
+        args = json.loads(arguments)
+        return fn(**args)
+    except (json.JSONDecodeError, TypeError) as e:
+        return f"Error calling {name}: {e}"
+
+
+def agent_run(messages: list[dict], max_iterations: int = 5) -> str:
+    """
+    Agent loop: keep calling the model until it stops requesting tools
+    """
+    for _ in range(max_iterations):
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+        )
+        message = response.choices[0].message
+
+        # no tool calls -> final answer, we're done
+        if not message.tool_calls:
+            messages.append({
+                "role": "assistant",
+                "content": message.content
+            })
+            return message.content
+
+        # append the assistant turn that requested the tools
+        messages.append(message)
+
+        # execute every tool call and append each result
+        for call in message.tool_calls:
+            result = dispatch(call.function.name, call.function.arguments)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": result,
+            })
+        # loop continues: model now sees the tool results
+    
+    return "Reached max iterations without a final answer."
 
 
 def main() -> None:
-    print(agent_run())
+    messages = [{
+        "role": "system",
+        "content": SYSTEM_PROMPT
+    }]
 
+    while True:
+        user_input = input("you> ").strip()
+        if user_input in {"exit", "quit"}:
+            break
+        messages.append({
+            "role": "user",
+            "content": user_input
+        })
+        print("agent> ", agent_run(messages))
+
+    db.close()  # Close SQLite connection on exit
 
 if __name__ == "__main__":
     main()
