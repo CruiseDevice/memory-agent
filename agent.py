@@ -1,5 +1,6 @@
 from client import MODEL, client
 from store import MemoryStore
+from thread import ThreadStore
 from tools import TOOL_SCHEMAS, dispatch, make_tools
 
 USER_ID = "agent_user"  # Fixed user ID for this session
@@ -59,7 +60,13 @@ memories exist, say you don't have that information yet — never
 invent one."""
 
 
-def agent_run(messages: list[dict], registry: dict, max_iterations: int = 5) -> str:
+def agent_run(
+    messages: list[dict],
+    registry: dict,
+    threads: ThreadStore,
+    thread_id: int,
+    max_iterations: int = 5
+) -> str:
     """
     Agent loop: keep calling the model until it stops requesting tools
     """
@@ -73,46 +80,119 @@ def agent_run(messages: list[dict], registry: dict, max_iterations: int = 5) -> 
 
         # no tool calls -> final answer, we're done
         if not message.tool_calls:
-            messages.append({
+            final_message = {
                 "role": "assistant",
                 "content": message.content
-            })
+            }
+            messages.append(final_message)
+            threads.append_message(thread_id, final_message)
             return message.content
 
         # append the assistant turn that requested the tools
         messages.append(message)
+        threads.append_message(thread_id, message)
+
 
         # execute every tool call and append each result
         for call in message.tool_calls:
             result = dispatch(call.function.name, call.function.arguments, registry)
-            messages.append({
+            tool_message = {
                 "role": "tool",
                 "tool_call_id": call.id,
                 "content": result,
-            })
+            }
+            messages.append(tool_message)
+            threads.append_message(thread_id, tool_message)
         # loop continues: model now sees the tool results
     
     return "Reached max iterations without a final answer."
 
 
 def main() -> None:
-    with MemoryStore("memories.db") as store:
+    with MemoryStore("memories.db") as store, ThreadStore("memories.db") as threads:
         registry = make_tools(store, USER_ID)
 
-        messages = [{
-            "role": "system",
-            "content": SYSTEM_PROMPT
-        }]
+        def system_only():
+            return [{
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            }]
+
+        # Start with the latest existing thread, or create a fresh one
+        existing = threads.list_threads(USER_ID)
+        if existing:
+            thread_id = existing[0]["id"]
+            messages = system_only()
+            messages.extend(threads.load_messages(thread_id))
+            print(f"Resuming thread {thread_id}: {existing[0]['title']} "
+                  f"({len(messages) - 1} prior messages)")
+        else:
+            thread_id = threads.create_thread(USER_ID, "Agent chat")
+            messages = system_only()
+            print(f"Started new thread {thread_id}")
 
         while True:
             user_input = input("you> ").strip()
-            if user_input in {"exit", "quit"}:
+            if not user_input:
+                continue
+
+            # --- slash commands ------------------------------------------------
+            if user_input == "/exit" or user_input in {"exit", "quit"}:
                 break
-            messages.append({
+
+            if user_input.startswith("/new"):
+                # Optional title after the command, e.g. /new Trip planning
+                title = user_input[len("/new"):].strip() or "Agent chat"
+                thread_id = threads.create_thread(USER_ID, title)
+                messages = system_only()
+                print(f"Started new thread {thread_id}: {title}")
+                continue
+
+            if user_input.startswith("/resume"):
+                thread_list = threads.list_threads(USER_ID)
+                if not thread_list:
+                    print("No saved threads to resume.")
+                    continue
+
+                print("\nSaved threads:")
+                for t in thread_list:
+                    print(f"  {t['id']}: {t['title']} "
+                          f"(updated {t['updated_at']})")
+
+                # Try to parse an id from the command, e.g. /resume 3
+                requested_id = user_input[len("/resume"):].strip()
+                if requested_id.isdigit():
+                    chosen_id = int(requested_id)
+                else:
+                    choice = input("Enter thread id to resume> ").strip()
+                    if not choice.isdigit():
+                        print("Invalid id. Staying on current thread.")
+                        continue
+                    chosen_id = int(choice)
+
+                if not any(t["id"] == chosen_id for t in thread_list):
+                    print(f"Thread {chosen_id} not found. Staying on current thread.")
+                    continue
+
+                thread_id = chosen_id
+                messages = system_only()
+                prior = threads.load_messages(thread_id)
+                messages.extend(prior)
+                print(f"Resumed thread {chosen_id} "
+                      f"({len(prior)} prior messages)")
+                continue
+            # -------------------------------------------------------------------
+
+            # Normal turn: save user message and run agent
+            user_message = {
                 "role": "user",
                 "content": user_input
-            })
-            print("agent> ", agent_run(messages, registry))
+            }
+            messages.append(user_message)
+            threads.append_message(thread_id, user_message)
+
+            reply = agent_run(messages, registry, threads, thread_id)
+            print("agent>", reply)
 
 
 if __name__ == "__main__":
