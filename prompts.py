@@ -4,8 +4,7 @@
 
 AGENT_SYSTEM_PROMPT = """You are a helpful assistant with persistent memory.
 You have two tools available: memory_search and memory_list.
-You do NOT have memory_store. Do not try to store memories yourself;
-they are extracted automatically in the background.
+Do not try to store memories yourself; they are extracted automatically in the background.
 
 ## When to use memory_search
 Call memory_search when the question is about a SPECIFIC topic with
@@ -44,7 +43,7 @@ yet — never invent one."""
 # -------------------------------------------------------------------------
 
 EXTRACTION_PROMPT = """You are a memory-extraction assistant.
-Analyze the last user-assistant turn and identify durable personal facts
+Analyze the user's last message and identify durable personal facts
 about the user that are worth remembering long-term.
 
 Extract things like:

@@ -13,26 +13,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "memory_store",
-            "description": "Store a durable fact about the user (preference, "
-                "personal detail, goal, constraint). Call when the user shares "
-                "lasting personal info, explicitly or implicitly. Search first "
-                "to avoid duplicates. Input: a short third-person fact string.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "A short, atomic, third-person fact. e.g. 'User likes hiking'"
-                    }
-                },
-                "required": ["content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "memory_search",
             "description": "Search stored memories by keyword. Call BEFORE "
                 "answering any question about the user's preferences, history, "
@@ -68,23 +48,6 @@ TOOL_SCHEMAS = [
 
 def make_tools(store: MemoryStore, user_id: str):
     # each tool closes over `store` and `user_id`
-
-    def memory_store(content: str) -> str:
-        """
-        1. Embed the raw text -> list[float32]
-        2. Serialize that list into a bytes BLOB
-        3. Persist the tuple (user_id, content, embedding) in the DB
-        """
-        # 1. create the numeric embedding
-        embedding_floats = _embed_text_to_floats(content)
-
-        # 2. turn it into the binary BLOB
-        embedding_blob = serialize_f32(embedding_floats)
-
-        # 3. call existing db layer
-        store.store(user_id=user_id, content=content, embedding=embedding_blob)
-        return f"Stored: {content}"
-
 
     def memory_search(keyword: str, *, top_k: int = 5, use_vector: bool = True) -> str:
         """
@@ -166,7 +129,6 @@ def make_tools(store: MemoryStore, user_id: str):
 
 
     registry = {
-        "memory_store": memory_store,
         "memory_search": memory_search,
         "memory_list": memory_list,
     }

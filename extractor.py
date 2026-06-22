@@ -2,17 +2,15 @@ import json
 import sys
 
 from client import MODEL, client
+from embeddings import _embed_text_to_floats, serialize_f32
 from prompts import EXTRACTION_PROMPT
-from tools import dispatch
+from store import MemoryStore
 
-
-def _is_error(result: object) -> bool:
-    return isinstance(result, str) and "error" in result.lower()
+DEDUP_THRESHOLD = 0.85
 
 
 def extract_facts(
     user_input: str,
-    assistant_reply: str,
     model: str = MODEL,
 ) -> list[str]:
     """
@@ -21,7 +19,7 @@ def extract_facts(
     """
     prompt = (
         EXTRACTION_PROMPT
-        + f"\n\nUser: {user_input}\nAssistant: {assistant_reply}\n\nReturn JSON:"
+        + f"\n\nUser: {user_input}\n\nReturn JSON:"
     )
     try:
         response = client.chat.completions.create(
@@ -44,33 +42,26 @@ def extract_facts(
         return []
 
 
-def background_store_fact(fact: str, registry: dict) -> None:
+def background_store_fact(fact: str, store: MemoryStore, user_id: str) -> None:
     """
-    Store one extracted fact using the same memory_store tool the agent uses.
-    Make sure the argument name matches your tools.py schema.
+    Store one extracted fact directly in the memory store.
+
+    Deduplicates against existing memories before storing.
     """
-    # --- best-effort duplicate guard ---------------------------------------
-    search_args = json.dumps({"keyword": fact, "top_k": 5})
-    search_result = dispatch("memory_search", search_args, registry)
+    # 1. embed
+    blob = serialize_f32(_embed_text_to_floats(fact))
 
-    if _is_error(search_result):
-        print(
-            f"[background] memory_search failed, "
-            f"proceeding to store anyway: {search_result}",
-            file=sys.stderr,
-        )
-    else:
-        # Naive exact-match guard. For production, do embedding-based
-        # deduplication inside MemoryStore instead.
-        if fact.lower() in str(search_result).lower():
-            return
+    # 2. check for near-duplicate
+    matches = store.find_similar(user_id, blob, threshold=DEDUP_THRESHOLD, top_k=1)
 
-    # --- store -------------------------------------------------------------
-    # NOTE: change "content" below if your memory_store schema uses a
-    # different parameter name (e.g. "memory", "text", "note").
-    store_args = json.dumps({"content": fact})
-    store_result = dispatch("memory_store", store_args, registry)
+    if matches:
+        # log and skip
+        best = matches[0]
+        print(f"[dedup] SKIP '{fact}' (similarity {best['similarity']:.3f} to '{best['content']}')", file=sys.stderr)
+        return
 
-    if _is_error(store_result):
-        print(f"[background] memory_store failed: {store_result}", file=sys.stderr)
+    # 3. store directly
+    store.store(user_id=user_id, content=fact, embedding=blob)
+    print(f"[store] STORED '{fact}'", file=sys.stderr)
+
 

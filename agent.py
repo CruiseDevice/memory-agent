@@ -1,7 +1,3 @@
-import json
-import os
-import sys
-
 from client import MODEL, client
 from extractor import background_store_fact, extract_facts
 from prompts import AGENT_SYSTEM_PROMPT
@@ -12,17 +8,9 @@ from tools import TOOL_SCHEMAS, dispatch, make_tools
 USER_ID = "agent_user"
 
 
-# -------------------------------------------------------------------------
-# Tool filtering
-# -------------------------------------------------------------------------
-
-def _tool_name(tool_schema: dict) -> str | None:
-    return tool_schema.get("function", {}).get("name")
-
-
 # The agent may READ memories but must never WRITE them.
 # Writing is handled by the background extractor after the assistant reply.
-AGENT_TOOLS = [t for t in TOOL_SCHEMAS if _tool_name(t) != "memory_store"]
+AGENT_TOOLS = list(TOOL_SCHEMAS)
 
 # -------------------------------------------------------------------------
 # Agent loop
@@ -42,7 +30,7 @@ def agent_run(
         response = client.chat.completions.create(
             model=MODEL,
             messages=messages,
-            tools=AGENT_TOOLS,  # <-- agent cannot see memory_store
+            tools=AGENT_TOOLS,  # <-- agent only reads memories; writes are handled by the extractor.
         )
         message = response.choices[0].message
 
@@ -149,9 +137,9 @@ def main() -> None:
             print("agent>", reply)
 
             # --- background extraction: single source of truth for writes ---
-            facts = extract_facts(user_input, reply)
+            facts = extract_facts(user_input)
             for fact in facts:
-                background_store_fact(fact, registry)
+                background_store_fact(fact, store, USER_ID)
 
 
 if __name__ == "__main__":
